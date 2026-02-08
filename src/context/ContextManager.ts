@@ -21,14 +21,28 @@ export class ContextManager {
      * ディレクトリの場合は再帰的にファイルを追加
      */
     async addPath(filePath: string): Promise<void> {
-        const stat = await fs.promises.stat(filePath);
+        try {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                throw new Error('ワークスペースが開かれていません');
+            }
 
-        if (stat.isDirectory()) {
-            // ディレクトリの場合は中のファイルを再帰的に追加
-            await this.addDirectory(filePath);
-        } else {
-            // ファイルの場合は直接追加
-            this.addSingleFile(filePath);
+            const absolutePath = path.isAbsolute(filePath)
+                ? filePath
+                : path.join(workspaceFolder.uri.fsPath, filePath);
+
+            const stat = await fs.promises.stat(absolutePath);
+
+            if (stat.isDirectory()) {
+                // ディレクトリの場合は中のファイルを再帰的に追加
+                await this.addDirectory(absolutePath);
+            } else {
+                // ファイルの場合は直接追加
+                this.addSingleFile(absolutePath);
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(`ファイルの追加に失敗: ${filePath}. エラー: ${error instanceof Error ? error.message : String(error)}`);
+            console.error(`Error adding path ${filePath}:`, error);
         }
     }
 

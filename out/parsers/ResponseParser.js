@@ -46,8 +46,20 @@ class ResponseParser {
      * LLMの回答をパースして適用
      */
     async parseAndApply(response) {
-        const changes = this.parse(response);
-        if (changes.length === 0) {
+        // parseメソッドをawait
+        const parsedResult = await this.parse(response);
+        // LLMのリクエストがある場合（ファイル変更を除く）、それらを優先して処理
+        if (parsedResult.requestedFiles && parsedResult.requestedFiles.length > 0 || parsedResult.switchModeTo || parsedResult.continueRequested) {
+            // ファイル変更があったとしても、それらは保留し、リクエストを処理させる
+            // この場合、filesModifiedは0として返す（実ファイル変更は行われないため）
+            return {
+                ...parsedResult,
+                filesModified: 0,
+                success: true, // リクエストが有効なため成功とする
+            };
+        }
+        // ファイル変更がない場合は、エラーを返す
+        if (parsedResult.changes.length === 0) {
             return {
                 success: false,
                 filesModified: 0,
@@ -55,19 +67,18 @@ class ResponseParser {
                 changes: [],
             };
         }
-        this.pendingChanges = changes;
+        this.pendingChanges = parsedResult.changes; // 変更のみをpendingChangesに格納
         // 変更一覧を表示
-        const items = changes.map(c => {
+        const items = parsedResult.changes.map(c => {
             const icon = c.type === 'create' ? '🆕' : c.type === 'delete' ? '🗑️' : '📝';
             return `${icon} ${c.filePath}`;
         });
-        // QuickPickで選択肢を表示
         const action = await vscode.window.showQuickPick([
-            { label: '$(check) すべて適用', description: `${changes.length}件の変更`, action: 'apply' },
+            { label: '$(check) すべて適用', description: `${parsedResult.changes.length}件の変更`, action: 'apply' },
             { label: '$(diff) 変更内容を確認', description: 'diffエディタで確認してから適用', action: 'preview' },
             { label: '$(close) キャンセル', action: 'cancel' },
         ], {
-            placeHolder: `${changes.length}件のファイル変更が検出されました`,
+            placeHolder: `${parsedResult.changes.length}件のファイル変更が検出されました`,
             title: 'LLM Bridge: 変更の適用',
         });
         if (!action || action.action === 'cancel') {
@@ -80,7 +91,7 @@ class ResponseParser {
         }
         if (action.action === 'preview') {
             // プレビューモード: 各ファイルのdiffを表示し、最後に確認
-            await this.showDiffPreview(changes);
+            await this.showDiffPreview(parsedResult.changes);
             return {
                 success: false,
                 filesModified: 0,
@@ -89,7 +100,7 @@ class ResponseParser {
             };
         }
         // 変更を適用
-        return await this.applyAllChanges(changes);
+        return await this.applyAllChanges(parsedResult.changes);
     }
     /**
      * 保留中の変更を確認して適用
@@ -128,12 +139,19 @@ class ResponseParser {
                 changes: [],
             };
         }
+        finally {
+            await this.cleanupTempFiles(); // 変更適用後またはエラー発生時に一時ファイルをクリーンアップ
+        }
     }
     /**
      * 回答をパース
      */
-    parse(response) {
+    async parse(response) {
         const changes = [];
+        let requestedFiles = []; // 初期化を空配列に変更
+        let switchModeTo;
+        let continueRequested;
+        let requestReason;
         // パターン1: <<<FILE:path>>> ... <<<END>>> 形式
         const fileBlockPattern = /<<<FILE:\s*(?:\[NEW\]\s*)?(.+?)>>>[\s\S]*?([\s\S]*?)<<<END>>>/g;
         let match;
@@ -158,14 +176,105 @@ class ResponseParser {
                 type: 'delete',
             });
         }
-        // パターン1,2でマッチしなかった場合、パターン3を試す
-        if (changes.length === 0) {
-            // パターン3: ```言語:path ... ``` 形式
+        // パターン3: <<<REPLACE_SECTION: path/to/file.ts>>> 形式の解析
+        const replaceSectionPattern = /<<<REPLACE_SECTION:\s*(.+?)>>>\n([\s\S]+?)<<<END>>>/g;
+        let replaceSectionMatch;
+        while ((replaceSectionMatch = replaceSectionPattern.exec(response)) !== null) {
+            const filePath = replaceSectionMatch[1].trim();
+            const replaceBlocksContent = replaceSectionMatch[2]; // SEARCH/REPLACEブロック全体
+            // 既存ファイルの内容を読み込む
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                console.error(`[LLM Bridge - Parser] Error: Workspace not open, cannot apply REPLACE_SECTION for ${filePath}.`);
+                continue; // 次のブロックへ
+            }
+            const fullPath = path.isAbsolute(filePath)
+                ? filePath
+                : path.join(workspaceFolder.uri.fsPath, filePath);
+            let originalFileContent;
+            try {
+                originalFileContent = await fs.promises.readFile(fullPath, 'utf-8');
+            }
+            catch (e) {
+                console.error(`[LLM Bridge - Parser] Error reading file for REPLACE_SECTION: ${fullPath}. ${e instanceof Error ? e.message : String(e)}`);
+                continue; // ファイルが読めない場合はスキップ
+            }
+            let currentFileContent = originalFileContent;
+            const searchReplaceBlockPattern = /<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE/g;
+            let srMatch;
+            // 各SEARCH/REPLACEブロックを処理
+            while ((srMatch = searchReplaceBlockPattern.exec(replaceBlocksContent)) !== null) {
+                const searchContent = srMatch[1];
+                const replaceContent = srMatch[2];
+                // 最初のマッチのみを置換
+                const updatedContent = currentFileContent.replace(searchContent, replaceContent);
+                if (currentFileContent === updatedContent) {
+                    console.warn(`[LLM Bridge - Parser] REPLACE_SECTION: Search content not found for file ${filePath} in block: \nSEARCH:\n${searchContent}\nREPLACE:\n${replaceContent}`);
+                    // 警告は出すが、処理は続行（他のブロックに影響しないため）
+                }
+                currentFileContent = updatedContent;
+            }
+            // 更新されたファイル内容でFileChangeを作成
+            changes.push({
+                filePath,
+                content: currentFileContent,
+                type: 'modify',
+            });
+        }
+        // パターン4: <<<REQUEST_FILE: path/to/file.ts>>>
+        const requestFileGlobalPattern = /<<<REQUEST_FILE:\s*(.+?)>>>/g;
+        let requestFileMatch;
+        while ((requestFileMatch = requestFileGlobalPattern.exec(response)) !== null) {
+            requestedFiles.push(requestFileMatch[1].trim());
+        }
+        // パターン5: <<<REQUEST_FILES>>> ... <<<END>>>
+        const requestFilesPattern = /<<<REQUEST_FILES>>>([\s\S]+?)<<<END>>>/;
+        let requestFilesMatch;
+        if ((requestFilesMatch = requestFilesPattern.exec(response)) !== null) {
+            const filesList = requestFilesMatch[1].trim().split('\n').map(line => line.trim().replace(/^- /, '')).filter(Boolean);
+            requestedFiles.push(...filesList);
+        }
+        // パターン6: <<<SWITCH_MODE: edit>>> ... <<<END>>>
+        const switchModePattern = /<<<SWITCH_MODE:\s*(browse|edit)>>>\s*(?:対象ファイル:([\s\S]*?))?\s*(?:理由:([\s\S]*?))?<<<END>>>/;
+        let switchModeMatch;
+        if ((switchModeMatch = switchModePattern.exec(response)) !== null) {
+            switchModeTo = switchModeMatch[1].trim();
+            if (switchModeMatch[2]) {
+                const filesList = switchModeMatch[2].trim().split('\n').map(line => line.trim().replace(/^- /, '')).filter(Boolean);
+                filesList.forEach(file => {
+                    if (!requestedFiles.includes(file)) {
+                        requestedFiles.push(file);
+                    }
+                });
+            }
+            if (switchModeMatch[3]) {
+                requestReason = switchModeMatch[3].trim();
+            }
+        }
+        // パターン7: <<<CONTINUE>>> ... <<<END>>>
+        const continuePattern = /<<<CONTINUE>>>[\s\S]*?<<<END>>>/g;
+        if (continuePattern.test(response)) {
+            continueRequested = true;
+        }
+        // --- デバッグログを追加 ---
+        console.log(`[LLM Bridge - Parser] Response Parse Summary:`);
+        console.log(`  - Files to change: ${changes.length}`);
+        if (changes.length > 0) {
+            changes.forEach(c => console.log(`    - [${c.type}] ${c.filePath}`));
+        }
+        console.log(`  - Files requested: ${requestedFiles.length}`);
+        if (requestedFiles.length > 0) {
+            requestedFiles.forEach(file => console.log(`    - ${file}`));
+        }
+        console.log(`  - Switch Mode Request: ${switchModeTo || 'None'}`);
+        console.log(`  - Continue Request: ${continueRequested ? 'Yes' : 'No'}`);
+        // --- デバッグログここまで ---
+        // パターン8: ```言語:path ... ``` 形式 (フォールバック、ただし変更リクエストより優先度は低い)
+        if (changes.length === 0 && requestedFiles.length === 0 && !switchModeTo && !continueRequested) {
             const codeBlockPattern = /```(\w+)?:?\s*([^\n`]+)?\n([\s\S]*?)```/g;
             while ((match = codeBlockPattern.exec(response)) !== null) {
                 const possiblePath = match[2]?.trim();
                 const content = match[3].trim();
-                // パスらしき文字列がある場合のみ追加
                 if (possiblePath && possiblePath.includes('.')) {
                     changes.push({
                         filePath: possiblePath,
@@ -175,8 +284,17 @@ class ResponseParser {
                 }
             }
         }
-        return changes;
+        return {
+            success: true, // パース自体は成功
+            filesModified: changes.length, // パース時点での変更数
+            changes,
+            requestedFiles: requestedFiles.length > 0 ? requestedFiles : undefined, // 空配列の場合はundefinedに戻す
+            switchModeTo,
+            continueRequested,
+            requestReason,
+        };
     }
+    // --- applyUnifiedDiff メソッドは完全に削除 ---
     /**
      * Diffプレビューを表示 (非モーダル)
      */
@@ -229,6 +347,7 @@ class ResponseParser {
         statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         statusBarItem.show();
         // 10秒後にステータスバーを非表示
+        // TODO: ユーザーがpreview中にStatusBarItemを閉じてしまう可能性があるので、永続的な表示を検討
         setTimeout(() => {
             statusBarItem.dispose();
         }, 10000);
@@ -273,11 +392,13 @@ class ResponseParser {
         }
         // ファイルを書き込み
         await fs.promises.writeFile(fullPath, change.content, 'utf-8');
-        // エディタで開く
-        const doc = await vscode.workspace.openTextDocument(fullPath);
-        await vscode.window.showTextDocument(doc);
-        // 一時ファイルをクリーンアップ
-        await this.cleanupTempFiles();
+        // エディタで開く (新規ファイルの場合のみ開くべきか？)
+        // 変更されたファイルが既に開かれている場合は、自動で更新される
+        // 新規ファイルまたは閉じていたファイルの場合は開く
+        if (!vscode.workspace.textDocuments.some(doc => doc.uri.fsPath === fullPath)) {
+            const doc = await vscode.workspace.openTextDocument(fullPath);
+            await vscode.window.showTextDocument(doc);
+        }
     }
 }
 exports.ResponseParser = ResponseParser;

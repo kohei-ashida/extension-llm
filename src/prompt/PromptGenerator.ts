@@ -32,9 +32,9 @@ const TEMPLATES: Record<TaskType, PromptTemplate> = {
 };
 
 /**
- * システムプロンプト - モードと出力形式の詳細説明
+ * システムプロンプト - モードと出力形式の詳細説明 (フルバージョン)
  */
-const SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
+const FULL_SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
 
 あなたは優秀なソフトウェアエンジニアとして、ユーザーのコーディングタスクを支援します。
 以下のルールに従って回答してください。
@@ -52,7 +52,6 @@ const SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
 - 詳細を見たいファイルがあれば、以下の形式で要求してください:
 
 #### ファイル詳細のリクエスト
-単一ファイル:
 \\\`\\\`\\\`
 <<<REQUEST_FILE: path/to/file.ts>>>
 \\\`\\\`\\\`
@@ -85,7 +84,8 @@ const SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
 
 ### コード変更がある場合
 
-ファイルを変更する場合は、**必ず以下の形式**で回答してください:
+ファイルを変更する場合は、**以下のいずれかの形式（ファイル全体の置換、新規ファイル作成、または部分置換）** で回答してください。
+**部分的な変更（Diff形式）はサポートしていません**。
 
 #### 全体置換 (ファイル全体を書き換える場合)
 \`\`\`
@@ -95,21 +95,48 @@ const SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
 <<<END>>>
 \`\`\`
 
-#### 差分更新 (一部のみ変更する場合)
-小さな変更の場合は、差分形式も使用可能:
+#### 新規ファイル作成 (上記 <<<FILE>>> 形式と同じ)
+// 新規ファイルの場合は \`<<<FILE: [NEW] path/to/newfile.ts>>>\` のように \`[NEW]\` を付けてください。
+
+#### 部分置換 (ファイルの一部を変更する場合)
 \`\`\`
-<<<DIFF: path/to/file.ts>>>
-@@ -10,5 +10,7 @@
- // 変更前の行 (コンテキスト)
--削除される行
-+追加される行
- // 変更後の行 (コンテキスト)
+<<<REPLACE_SECTION: path/to/file.ts>>>
+<<<<<<< SEARCH
+// 変更対象の厳密な内容をここに記述
+// 改行、空白、インデントも含め、ファイル内の内容と完全に一致させてください。
+// 余分な行を含めず、変更される行と一意性を確保するための最小限の周囲の行のみを含めてください。
+=======
+// 新しい内容をここに記述
+// SEARCHで指定した内容と置き換えられます。
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+// 別の変更対象...
+=======
+// 別の新しい内容...
+>>>>>>> REPLACE
 <<<END>>>
 \`\`\`
+**\`<<<REPLACE_SECTION>>>\` の重要なルール:**
+1.  \`SEARCH\`の内容は、置換対象となるファイル内のセクションと**完全に一致**させてください。
+    *   空白、インデント、改行、コメントなども含め、文字通り完全に一致する必要があります。
+2.  各\`SEARCH/REPLACE\`ブロックは、最初に見つかった箇所のみを置換します。
+    *   複数の変更が必要な場合は、複数の\`SEARCH/REPLACE\`ブロックを記述してください。
+    *   各\`SEARCH\`セクションには、変更される行と、その行を一意に特定するために必要な最小限の周囲の行のみを含めてください。
+    *   複数の\`SEARCH/REPLACE\`ブロックを記述する場合、ファイル内での出現順に並べてください。
+3.  \`SEARCH/REPLACE\`ブロックは簡潔にしてください。
+    *   大きな変更は、一連の小さな\`SEARCH/REPLACE\`ブロックに分割してください。
+    *   変更されない長い行の連続を\`SEARCH/REPLACE\`ブロックに含めないでください。
+4.  特殊な操作:
+    *   **コードの削除**: \`REPLACE\`セクションを空にしてください。
+    *   **コードの移動**: 2つの\`<<<REPLACE_SECTION>>>\`ブロックを使用します（1つは元の場所からの削除、もう1つは新しい場所への挿入）。
 
-### 複数ファイルを変更する場合
+#### ファイル削除
+\`\`\`
+<<<DELETE: path/to/oldfile.ts>>>
+\`\`\`
 
-各ファイルを別々のブロックで記述:
+#### 複数ファイルを変更する場合
+// 複数のファイルを変更する場合も、各ファイルごとに上記の \`<<<FILE: ...>>>\` または \`<<<DELETE: ...>>>\` 形式で記述してください。
 \`\`\`
 <<<FILE: src/utils.ts>>>
 ...コード...
@@ -118,21 +145,6 @@ const SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
 <<<FILE: src/index.ts>>>
 ...コード...
 <<<END>>>
-\`\`\`
-
-### 新規ファイル作成
-
-ファイルパスに [NEW] を付けて明示:
-\`\`\`
-<<<FILE: [NEW] src/newFile.ts>>>
-...新しいファイルの内容...
-<<<END>>>
-\`\`\`
-
-### ファイル削除
-
-\`\`\`
-<<<DELETE: src/oldFile.ts>>>
 \`\`\`
 
 ---
@@ -145,13 +157,13 @@ const SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
 
 1. **優先順位を付けて回答**: 最も重要な変更から順に出力
 2. **続きがある場合は明示**: 回答の最後に以下を追加
-   \`\`\`
+   \\\`\\\`\\\`
    <<<CONTINUE>>>
    残り: N個のファイル変更があります
    - path/to/file1.ts
    - path/to/file2.ts
    <<<END>>>
-   \`\`\`
+   \\\`\\\`\\\`
 3. ユーザーが「続けて」と言ったら、残りを出力
 
 ### 入力が分割されて送られてきた場合
@@ -173,6 +185,96 @@ const SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
 `;
 
 /**
+ * システムプロンプト - モードと出力形式の詳細説明 (ミニマルバージョン)
+ */
+const MINIMAL_SYSTEM_PROMPT = `# あなたはコーディングアシスタントです
+
+あなたは優秀なソフトウェアエンジニアとして、ユーザーのコーディングタスクを支援します。
+以下のルールに従って回答してください。
+
+---
+
+## 回答形式
+
+### コード変更がある場合
+
+ファイルを変更する場合は、**以下のいずれかの形式（ファイル全体の置換、新規ファイル作成、または部分置換）** で回答してください。
+**部分的な変更（Diff形式）はサポートしていません**。
+
+#### 全体置換 (ファイル全体を書き換える場合)
+\`\`\`
+<<<FILE: path/to/file.ts>>>
+// ファイルの完全な内容
+<<<END>>>
+\`\`\`
+
+#### 新規ファイル作成
+// 新規ファイルの場合は \`<<<FILE: [NEW] path/to/newfile.ts>>>\` のように \`[NEW]\` を付けてください。
+
+#### 部分置換 (ファイルの一部を変更する場合)
+\`\`\`
+<<<REPLACE_SECTION: path/to/file.ts>>>
+<<<<<<< SEARCH
+// 変更対象の厳密な内容
+=======
+// 新しい内容
+>>>>>>> REPLACE
+<<<END>>>
+\`\`\`
+**\\\`<<<REPLACE_SECTION>>>\\\` のルール:** \`SEARCH\`の内容は完全に一致、各ブロックは最初のマッチのみ置換、ブロックは簡潔に。
+
+#### ファイル削除
+\`\`\`
+<<<DELETE: path/to/oldfile.ts>>>
+\`\`\`
+
+---
+
+## ファイルリクエスト形式
+
+閲覧モードでファイルの詳細を確認したい場合、LLMは以下の形式で要求します。
+
+### 単一ファイルのリクエスト
+\\\`\\\`\\\`
+<<<REQUEST_FILE: path/to/file.ts>>>
+\\\`\\\`\\\`
+
+### 複数ファイルのリクエスト
+\\\`\\\`\\\`
+<<<REQUEST_FILES>>>
+- path/to/file1.ts
+- path/to/file2.ts
+<<<END>>>
+\\\`\\\`\\\`
+
+### 編集モードへの切替をリクエスト
+\\\`\\\`\\\`
+<<<SWITCH_MODE: edit>>>
+対象ファイル:
+- path/to/file.ts
+理由: バグ修正のために完全なコードが必要です
+<<<END>>>
+\\\`\\\`\\\`
+
+---
+
+## 文字数制限への対応
+
+### 出力が長くなる場合
+
+回答が長くなりそうな場合は、以下の方法で分割してください:
+
+1. **続きがある場合は明示**: 回答の最後に以下を追加
+   \\\`\\\`\\\`
+   <<<CONTINUE>>>
+   残り: N個のファイル変更があります
+   - path/to/file1.ts
+   - path/to/file2.ts
+   <<<END>>>
+   \\\`\\\`\\\`
+`;
+
+/**
  * 分割送信用のヘッダー
  */
 function getPartHeader(partNumber: number, totalParts: number): string {
@@ -188,6 +290,7 @@ ${partNumber < totalParts ? '（続きがあります。すべて受け取って
 export class PromptGenerator {
     private contextManager: ContextManager;
     private taskType: TaskType = 'general';
+    private systemPromptLevel: 'full' | 'minimal' = 'full'; // 新しいプロパティ
 
     constructor(contextManager: ContextManager) {
         this.contextManager = contextManager;
@@ -218,6 +321,21 @@ export class PromptGenerator {
     }
 
     /**
+     * システムプロンプトレベルを設定
+     */
+    setSystemPromptLevel(level: 'full' | 'minimal'): void {
+        this.systemPromptLevel = level;
+    }
+
+    /**
+     * システムプロンプトレベルを取得
+     */
+    getSystemPromptLevel(): 'full' | 'minimal' {
+        return this.systemPromptLevel;
+    }
+
+
+    /**
      * プロンプトを生成
      */
     async generate(): Promise<string> {
@@ -228,8 +346,8 @@ export class PromptGenerator {
 
         let prompt = '';
 
-        // システムプロンプト (最初のターンのみ推奨)
-        prompt += SYSTEM_PROMPT;
+        // システムプロンプト
+        prompt += (this.systemPromptLevel === 'full' ? FULL_SYSTEM_PROMPT : MINIMAL_SYSTEM_PROMPT);
 
         // 現在のモード表示
         if (mode === 'browse') {
@@ -368,6 +486,6 @@ export class PromptGenerator {
      * システムプロンプトのみを取得（最初のターン用）
      */
     getSystemPromptOnly(): string {
-        return SYSTEM_PROMPT;
+        return FULL_SYSTEM_PROMPT; // ここも変更する予定だが、いったんFULL_SYSTEM_PROMPT
     }
 }

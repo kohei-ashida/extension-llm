@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { ContextManager, ContextMode } from '../context/ContextManager';
 import { PromptGenerator, TaskType } from '../prompt/PromptGenerator';
-import { ResponseParser } from '../parsers/ResponseParser';
+import { ResponseParser, ParseResult } from '../parsers/ResponseParser';
+import { HistoryManager, HistoryEntry, PromptGeneratedDetails, ResponseAppliedDetails, ActionDetail, UserActionDetails } from '../history/HistoryManager';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
@@ -10,8 +11,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
         private readonly contextManager: ContextManager,
         private readonly promptGenerator: PromptGenerator,
-        private readonly responseParser: ResponseParser
+        private readonly responseParser: ResponseParser,
+        private readonly historyManager: HistoryManager // HistoryManagerを追加
     ) { }
+
+    public postMessageToWebview(message: any) {
+        if (this._view) {
+            this._view.webview.postMessage(message);
+        }
+    }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -41,21 +49,55 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'setMode':
                     this.contextManager.setMode(data.mode as ContextMode);
+                    // モード変更もユーザーアクションとして履歴に記録
+                    await vscode.commands.executeCommand('llmBridge.recordUserAction', {
+                        actionType: 'set_mode',
+                        target: data.mode,
+                        status: 'success',
+                        message: `モードを${data.mode}に設定`,
+                    });
                     this.refresh();
                     break;
                 case 'setTaskType':
                     this.promptGenerator.setTaskType(data.taskType as TaskType);
+                    // タスク種別変更もユーザーアクションとして履歴に記録
+                    await vscode.commands.executeCommand('llmBridge.recordUserAction', {
+                        actionType: 'set_task_type',
+                        target: data.taskType,
+                        status: 'success',
+                        message: `タスク種別を${data.taskType}に設定`,
+                    });
+                    this.refresh(); // タスク種別変更時に文字数も更新したいのでrefresh
+                    break;
+                case 'setSystemPromptLevel':
+                    await vscode.commands.executeCommand('llmBridge.setSystemPromptLevel', data.level);
+                    this.refresh();
                     break;
                 case 'setInstruction':
                     this.contextManager.setInstruction(data.instruction);
+                    // 指示の入力は頻繁なので履歴には記録しない
                     this.updateCharCount();
                     break;
                 case 'removeFile':
                     this.contextManager.removeFile(data.filePath);
+                    // ファイル削除もユーザーアクションとして履歴に記録
+                    await vscode.commands.executeCommand('llmBridge.recordUserAction', {
+                        actionType: 'remove_file',
+                        target: data.filePath,
+                        status: 'success',
+                        message: `コンテキストからファイルを削除: ${data.filePath}`,
+                    });
                     this.refresh();
                     break;
                 case 'clearContext':
                     this.contextManager.clear();
+                    // コンテキストクリアもユーザーアクションとして履歴に記録
+                    await vscode.commands.executeCommand('llmBridge.recordUserAction', {
+                        actionType: 'clear_context',
+                        target: 'all files',
+                        status: 'success',
+                        message: 'コンテキストをクリア',
+                    });
                     this.refresh();
                     break;
                 case 'ready':
@@ -74,6 +116,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 taskType: this.promptGenerator.getTaskType(),
                 taskTypes: this.promptGenerator.getAvailableTaskTypes(),
                 instruction: this.contextManager.getInstruction(),
+                systemPromptLevel: this.promptGenerator.getSystemPromptLevel(),
+                history: this.historyManager.getHistory(), // 履歴データを追加
             });
             this.updateCharCount();
         }
@@ -94,28 +138,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async handleGeneratePrompt() {
         try {
-            const result = await this.promptGenerator.checkCharLimit();
-
-            if (result.exceeded) {
-                // 分割送信が必要
-                const parts = await this.promptGenerator.generateSplit(result.limit);
-                await vscode.env.clipboard.writeText(parts[0]);
-                vscode.window.showInformationMessage(
-                    `パート 1/${parts.length} をコピーしました (${parts[0].length}文字)`
-                );
-                this._view?.webview.postMessage({
-                    type: 'splitPromptGenerated',
-                    totalParts: parts.length,
-                    currentPart: 1
-                });
-            } else {
-                const prompt = await this.promptGenerator.generate();
-                await vscode.env.clipboard.writeText(prompt);
-                vscode.window.showInformationMessage(
-                    `プロンプトをクリップボードにコピーしました (${prompt.length}文字)`
-                );
-                this._view?.webview.postMessage({ type: 'promptCopied' });
-            }
+            await vscode.commands.executeCommand('llmBridge.generatePrompt');
         } catch (error) {
             vscode.window.showErrorMessage(
                 `プロンプト生成に失敗: ${error instanceof Error ? error.message : String(error)}`
@@ -124,47 +147,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleGenerateSplitPrompt(partIndex: number) {
-        try {
-            const result = await this.promptGenerator.checkCharLimit();
-            const parts = await this.promptGenerator.generateSplit(result.limit);
-
-            if (partIndex < parts.length) {
-                await vscode.env.clipboard.writeText(parts[partIndex]);
-                vscode.window.showInformationMessage(
-                    `パート ${partIndex + 1}/${parts.length} をコピーしました (${parts[partIndex].length}文字)`
-                );
-                this._view?.webview.postMessage({
-                    type: 'splitPromptGenerated',
-                    totalParts: parts.length,
-                    currentPart: partIndex + 1
-                });
-            }
-        } catch (error) {
-            vscode.window.showErrorMessage(
-                `プロンプト生成に失敗: ${error instanceof Error ? error.message : String(error)}`
-            );
-        }
+        await vscode.commands.executeCommand('llmBridge.generateSplitPromptPart', partIndex);
     }
 
     private async handleApplyResponse(response: string) {
         try {
-            const result = await this.responseParser.parseAndApply(response);
-            if (result.success) {
-                vscode.window.showInformationMessage(
-                    `${result.filesModified}個のファイルを更新しました`
-                );
-                this._view?.webview.postMessage({ type: 'applySuccess', result });
-            } else {
-                vscode.window.showWarningMessage(`適用失敗: ${result.error}`);
-            }
+            await vscode.env.clipboard.writeText(response);
+            await vscode.commands.executeCommand('llmBridge.applyResponse');
         } catch (error) {
             vscode.window.showErrorMessage(
-                `適用に失敗: ${error instanceof Error ? error.message : String(error)}`
+                `応答適用に失敗: ${error instanceof Error ? error.message : String(error)}`
             );
         }
     }
 
-    private _getHtmlForWebview(_webview: vscode.Webview) {
+    private _getHtmlForWebview(webview: vscode.Webview) {
         return `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -348,6 +345,92 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             margin-bottom: 4px;
             color: var(--vscode-descriptionForeground);
         }
+
+        /* History */
+        .history-section {
+            margin-top: 24px;
+            border-top: 1px solid var(--vscode-panel-border);
+            padding-top: 16px;
+        }
+        .history-item {
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            margin-bottom: 8px;
+            overflow: hidden;
+        }
+        .history-header {
+            display: flex;
+            align-items: flex-start; /* centerからflex-startに変更して、上揃えにする */
+            justify-content: space-between;
+            padding: 8px;
+            cursor: pointer;
+            background: var(--vscode-panelTitle-activeBackground);
+        }
+        .history-header.success { background: var(--vscode-statusBar-background); }
+        .history-header.failure { background: var(--vscode-errorForeground); color: var(--vscode-errorBackground); }
+        .history-header.warning { background: var(--vscode-statusBarItem-warningBackground); }
+        .history-header.info { background: var(--vscode-statusBarItem-prominentBackground); }
+
+        .history-title {
+            font-weight: bold;
+            font-size: 13px;
+            display: flex;
+            align-items: center; /* ここはcenterのままでOK */
+            gap: 6px;
+            flex-shrink: 0; /* タイトルが長くなっても縮まないように */
+            word-break: break-word; /* 長い単語がはみ出さないように */
+        }
+        .history-timestamp {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            flex-shrink: 0;
+            margin-left: auto; /* 右寄せ */
+        }
+        .history-content {
+            padding: 8px;
+            border-top: 1px solid var(--vscode-panel-border);
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+        }
+        .history-item.expanded .history-content {
+            max-height: 500px; /* ある程度の最大高さを設定 */
+            transition: max-height 0.5s ease-in;
+        }
+        .history-detail {
+            font-size: 12px;
+            margin-bottom: 4px;
+            line-height: 1.4em; /* 行高さを明示的に設定 */
+        }
+        .history-actions {
+            margin-top: 8px;
+            border-top: 1px dashed var(--vscode-panel-border);
+            padding-top: 8px;
+        }
+        .action-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        .action-status.success { color: var(--vscode-terminal-ansiGreen); }
+        .action-status.failure { color: var(--vscode-terminal-ansiRed); }
+.action-status.warning { color: var(--vscode-terminal-ansiYellow); }
+        .action-status.skipped { color: var(--vscode-descriptionForeground); }
+        .action-status.info { color: var(--vscode-terminal-ansiBlue); } /* infoカラー追加 */
+
+        .llm-response-preview {
+            max-height: 100px;
+            overflow-y: auto;
+            background: var(--vscode-textCodeBlock-background);
+            border: 1px solid var(--vscode-panel-border);
+            padding: 4px;
+            margin-top: 4px;
+            font-family: var(--vscode-editor-font-family);
+            font-size: 11px;
+        }
     </style>
 </head>
 <body>
@@ -392,6 +475,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="section">
+        <h2>📝 システムプロンプトレベル</h2>
+        <div class="system-prompt-level-toggle">
+            <button class="mode-btn active" id="fullPrompt" data-level="full">詳細</button>
+            <button class="mode-btn" id="minimalPrompt" data-level="minimal">最小限</button>
+        </div>
+    </div>
+
+    <div class="section">
         <h2>📁 コンテキスト</h2>
         <div class="file-list" id="fileList">
             <div class="empty-list">ファイルが選択されていません<br>右クリックメニューからファイルを追加</div>
@@ -412,6 +503,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <button class="primary" id="applyBtn">✅ 回答を適用</button>
     </div>
 
+    <div class="section history-section">
+        <h2>📜 アクティビティ履歴</h2>
+        <div id="historyList">
+            <div class="empty-list">まだアクティビティはありません。</div>
+        </div>
+    </div>
+
     <script>
         const vscode = acquireVsCodeApi();
 
@@ -429,6 +527,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const currentCount = document.getElementById('currentCount');
         const limitCount = document.getElementById('limitCount');
         const progressFill = document.getElementById('progressFill');
+        const fullPromptBtn = document.getElementById('fullPrompt');
+        const minimalPromptBtn = document.getElementById('minimalPrompt');
+        const historyList = document.getElementById('historyList');
 
         // モード切り替え
         browseMode.addEventListener('click', () => {
@@ -445,6 +546,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // タスク種別変更
         taskType.addEventListener('change', () => {
             vscode.postMessage({ type: 'setTaskType', taskType: taskType.value });
+        });
+
+        // システムプロンプトレベル切り替え
+        fullPromptBtn.addEventListener('click', () => {
+            fullPromptBtn.classList.add('active');
+            minimalPromptBtn.classList.remove('active');
+            vscode.postMessage({ type: 'setSystemPromptLevel', level: 'full' });
+        });
+        minimalPromptBtn.addEventListener('click', () => {
+            minimalPromptBtn.classList.add('active');
+            fullPromptBtn.classList.remove('active');
+            vscode.postMessage({ type: 'setSystemPromptLevel', level: 'minimal' });
         });
 
         // 指示入力
@@ -486,6 +599,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     setTimeout(() => {
                         generateBtn.textContent = '🚀 プロンプト生成 & コピー';
                     }, 2000);
+                    // 分割ナビゲーションを非表示にする
+                    document.getElementById('splitNav').style.display = 'none';
                     break;
                 case 'splitPromptGenerated':
                     showSplitNav(message.totalParts, message.currentPart);
@@ -508,6 +623,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
             // タスク種別
             taskType.value = data.taskType;
+
+            // システムプロンプトレベル
+            if (data.systemPromptLevel === 'full') {
+                fullPromptBtn.classList.add('active');
+                minimalPromptBtn.classList.remove('active');
+            } else {
+                minimalPromptBtn.classList.add('active');
+                fullPromptBtn.classList.remove('active');
+            }
 
             // ファイルリスト
             if (data.files && data.files.length > 0) {
@@ -532,6 +656,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (data.instruction !== undefined) {
                 instruction.value = data.instruction;
             }
+
+            // 履歴の更新
+            updateHistory(data.history);
         }
 
         function updateCharCount(data) {
@@ -577,19 +704,135 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         prevPartBtn.addEventListener('click', () => {
             if (splitState.current > 1) {
-                vscode.postMessage({ type: 'generateSplitPrompt', partIndex: splitState.current - 2 });
+                vscode.postMessage({ type: 'generateSplitPrompt', partIndex: splitState.current - 2 }); // partIndexは0ベース
             }
         });
 
         nextPartBtn.addEventListener('click', () => {
             if (splitState.current < splitState.total) {
-                vscode.postMessage({ type: 'generateSplitPrompt', partIndex: splitState.current });
+                vscode.postMessage({ type: 'generateSplitPrompt', partIndex: splitState.current }); // partIndexは0ベース
             }
         });
 
         copyCurrentPartBtn.addEventListener('click', () => {
-            vscode.postMessage({ type: 'generateSplitPrompt', partIndex: splitState.current - 1 });
+            vscode.postMessage({ type: 'generateSplitPrompt', partIndex: splitState.current - 1 }); // partIndexは0ベース
         });
+
+        // 履歴の更新
+        function updateHistory(historyData) {
+            if (!historyData || historyData.length === 0) {
+                historyList.innerHTML = '<div class="empty-list">まだアクティビティはありません。</div>';
+                return;
+            }
+
+            historyList.innerHTML = historyData.map(entry => {
+                let headerClass = '';
+                let title = '';
+                let contentHtml = '';
+                const timestamp = entry.timestamp;
+
+                if (entry.type === 'prompt_generated') {
+                    const d = entry.details;
+                    title = '🚀 プロンプト生成 (' + d.fullPromptLength + '文字)';
+                    headerClass = 'info';
+                    contentHtml =
+                        '<div class="history-detail">モード: ' + d.mode + '</div>' +
+                        '<div class="history-detail">レベル: ' + d.systemPromptLevel + '</div>' +
+                        '<div class="history-detail">タスク: ' + d.taskType + '</div>' +
+                        '<div class="history-detail">コンテキストファイル (' + d.filesInContext.length + '件): ' + (d.filesInContext.join(', ') || 'なし') + '</div>' +
+                        '<div class="history-detail">指示: ' + (d.instruction || 'なし') + '</div>' +
+                        '<div class="history-detail llm-response-preview">プロンプト要約: ' + d.promptSummary + '</div>';
+                } else if (entry.type === 'response_applied') {
+                    const d = entry.details;
+                    title = '✅ LLM応答適用 (' + (d.overallSuccess ? '成功' : '失敗') + ')';
+                    headerClass = d.overallSuccess ? 'success' : 'failure';
+                    contentHtml =
+                        '<div class="history-detail">全体結果: <span class="action-status ' + (d.overallSuccess ? 'success' : 'failure') + '">' + (d.overallSuccess ? '成功' : '失敗') + '</span></div>' +
+                        (d.errorMessage ? '<div class="history-detail action-status failure">エラー: ' + d.errorMessage + '</div>' : '') +
+                        '<div class="history-detail">解析結果: ' + d.parseResult.filesModified + 'ファイル変更, ' + (d.parseResult.requestedFiles ? d.parseResult.requestedFiles.length : 0) + 'ファイルリクエスト, モード: ' + (d.parseResult.switchModeTo || 'なし') + ', 続き: ' + (d.parseResult.continueRequested ? 'はい' : 'いいえ') + '</div>' +
+                        '<div class="history-detail llm-response-preview">LLM応答: ' + d.llmResponse.substring(0, 200) + '...</div>' +
+                        '<div class="history-actions">' +
+                            '<h3>実行されたアクション:</h3>' +
+                            d.actionsTaken.map(action =>
+                                '<div class="action-item">' +
+                                    '<span class="action-status ' + action.status + '">' + getActionIcon(action.status) + '</span>' +
+                                    '<span>' + getActionDescription(action) + '</span>' +
+                                '</div>'
+                            ).join('') +
+                        '</div>';
+                } else if (entry.type === 'user_action') {
+                    const d = entry.details;
+                    title = '👤 ユーザーアクション: ' + getUserActionTitle(d.actionType);
+                    headerClass = d.status === 'success' ? 'info' : 'failure';
+                    contentHtml =
+                        '<div class="history-detail">対象: ' + (d.target || 'N/A') + '</div>' +
+                        '<div class="history-detail">結果: <span class="action-status ' + d.status + '">' + (d.status === 'success' ? '成功' : '失敗') + '</span></div>' +
+                        (d.message ? '<div class="history-detail">メッセージ: ' + d.message + '</div>' : '');
+                }
+
+                return (
+                    '<div class="history-item" data-expanded="false">' +
+                        '<div class="history-header ' + headerClass + '">' +
+                            '<div class="history-title">' + title + '</div>' +
+                            '<div class="history-timestamp">' + timestamp + '</div>' +
+                        '</div>' +
+                        '<div class="history-content">' +
+                            contentHtml +
+                        '</div>' +
+                    '</div>'
+                );
+            }).join('');
+
+            // イベントリスナーを再設定
+            historyList.querySelectorAll('.history-header').forEach(header => {
+                header.addEventListener('click', (e) => {
+                    const item = header.closest('.history-item');
+                    item.dataset.expanded = item.dataset.expanded === 'true' ? 'false' : 'true';
+                });
+            });
+        }
+
+        function getActionIcon(status) {
+            switch (status) {
+                case 'success': return '✔';
+                case 'failure': return '✖';
+                case 'warning': return '!';
+                case 'skipped': return '-';
+                case 'pending': return '…';
+                default: return '';
+            }
+        }
+
+        function getActionDescription(action) {
+            let description = '';
+            switch (action.actionType) {
+                case 'file_create': description = 'ファイル作成: ' + action.target; break;
+                case 'file_modify': description = 'ファイル変更: ' + action.target; break;
+                case 'file_delete': description = 'ファイル削除: ' + action.target; break;
+                case 'file_request_add': description = 'ファイルを追加リクエスト: ' + action.target; break;
+                case 'mode_switch': description = 'モード変更: ' + action.target; break;
+                case 'continue_request': description = '続きを要求'; break;
+                case 'error': description = 'エラー: ' + action.message; break;
+                case 'warning': description = '警告: ' + action.message; break;
+                case 'none': description = 'アクションなし: ' + action.message; break;
+                default: description = '不明なアクション: ' + action.actionType; break;
+            }
+            return description + (action.message && action.actionType !== 'error' && action.actionType !== 'warning' ? ' (' + action.message + ')' : '');
+        }
+
+        function getUserActionTitle(actionType) {
+            switch (actionType) {
+                case 'add_file_to_context': return 'ファイルをコンテキストに追加';
+                case 'clear_context': return 'コンテキストをクリア';
+                case 'confirm_apply': return '変更を適用';
+                case 'remove_file': return 'ファイルをコンテキストから削除';
+                case 'set_mode': return 'モード設定';
+                case 'set_task_type': return 'タスク種別設定';
+                case 'set_instruction': return '指示設定';
+                case 'set_system_prompt_level': return 'システムプロンプトレベル設定';
+                default: return actionType;
+            }
+        }
 
         // 初期化完了を通知
         vscode.postMessage({ type: 'ready' });
