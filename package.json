@@ -1,0 +1,107 @@
+{
+  "name": "llm-copilot-bridge",
+  "displayName": "LLM Copilot Bridge",
+  "description": "ブラウザベースのLLM(M365 Copilot等)をコピペで連携し、コーディングエージェント風の体験を提供",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:llmBridge.sidebar"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "llm-bridge",
+          "title": "LLM Bridge",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "llm-bridge": [
+        {
+          "type": "webview",
+          "id": "llmBridge.sidebar",
+          "name": "LLM Copilot Bridge"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "llmBridge.generatePrompt",
+        "title": "LLM Bridge: プロンプトを生成してコピー"
+      },
+      {
+        "command": "llmBridge.applyResponse",
+        "title": "LLM Bridge: 回答を適用"
+      },
+      {
+        "command": "llmBridge.addFileToContext",
+        "title": "LLM Bridge: このファイルをコンテキストに追加"
+      },
+      {
+        "command": "llmBridge.confirmApply",
+        "title": "LLM Bridge: 変更を確認して適用"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "llmBridge.addFileToContext",
+          "group": "llmbridge"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "llmBridge.addFileToContext",
+          "group": "llmbridge"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "LLM Copilot Bridge",
+      "properties": {
+        "llmBridge.inputCharLimit": {
+          "type": "number",
+          "default": 4000,
+          "description": "LLMへの入力文字数制限"
+        },
+        "llmBridge.outputCharLimit": {
+          "type": "number",
+          "default": 4000,
+          "description": "LLMからの出力文字数制限"
+        },
+        "llmBridge.defaultMode": {
+          "type": "string",
+          "enum": [
+            "browse",
+            "edit"
+          ],
+          "default": "browse",
+          "description": "デフォルトモード (browse: 閲覧モード, edit: 編集モード)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.0"
+  }
+}
