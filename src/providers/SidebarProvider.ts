@@ -357,35 +357,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             border: 1px solid var(--vscode-panel-border);
             border-radius: 4px;
             margin-bottom: 8px;
-            overflow: hidden;
+            overflow: hidden; /* これが原因でスクロールバーが見えない可能性も */
+            min-height: 40px; /* 展開されてない状態でも最低限の高さ */
         }
         .history-header {
             display: flex;
-            align-items: flex-start; /* centerからflex-startに変更して、上揃えにする */
+            align-items: center; /* タイトルとタイムスタンプが中央にくるように */
             justify-content: space-between;
             padding: 8px;
             cursor: pointer;
             background: var(--vscode-panelTitle-activeBackground);
+            flex-wrap: wrap;
         }
-        .history-header.success { background: var(--vscode-statusBar-background); }
-        .history-header.failure { background: var(--vscode-errorForeground); color: var(--vscode-errorBackground); }
-        .history-header.warning { background: var(--vscode-statusBarItem-warningBackground); }
-        .history-header.info { background: var(--vscode-statusBarItem-prominentBackground); }
+        .history-header.success { background-color: var(--vscode-statusBar-background); color: var(--vscode-statusBar-foreground); }
+        .history-header.failure { background-color: var(--vscode-errorBackground); color: var(--vscode-errorForeground); }
+        .history-header.warning { background-color: var(--vscode-statusBarItem-warningBackground); color: var(--vscode-statusBarItem-warningForeground); }
+        .history-header.info { background-color: var(--vscode-statusBarItem-prominentBackground); color: var(--vscode-statusBarItem-prominentForeground); }
 
         .history-title {
             font-weight: bold;
             font-size: 13px;
             display: flex;
-            align-items: center; /* ここはcenterのままでOK */
+            align-items: center;
             gap: 6px;
-            flex-shrink: 0; /* タイトルが長くなっても縮まないように */
-            word-break: break-word; /* 長い単語がはみ出さないように */
+            flex-grow: 1;
+            word-break: break-word;
+            line-height: 1.4em; /* タイトルの行高も明示的に */
         }
         .history-timestamp {
             font-size: 11px;
             color: var(--vscode-descriptionForeground);
             flex-shrink: 0;
-            margin-left: auto; /* 右寄せ */
+            margin-left: auto;
+            white-space: nowrap;
+            line-height: 1.4em; /* タイムスタンプの行高も明示的に */
         }
         .history-content {
             padding: 8px;
@@ -393,15 +398,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             max-height: 0;
             overflow: hidden;
             transition: max-height 0.3s ease-out;
+            box-sizing: border-box;
+            background-color: var(--vscode-editorGroup-background); /* 背景色を明確に */
         }
         .history-item.expanded .history-content {
-            max-height: 500px; /* ある程度の最大高さを設定 */
-            transition: max-height 0.5s ease-in;
+            /* max-height: none; はtransitionと相性が悪い */
+            /* JavaScriptで動的にmax-heightを設定するため、ここでの固定値は不要になるが、
+               transitionが効くようにデフォルトのmax-heightを少し大きくしておくか、
+               JavaScriptでscrollHeightを設定する */
+            /* max-height: 2000px; */ /* この行はJavaScriptが上書きするので削除またはコメントアウト */
+            overflow-y: auto;
         }
         .history-detail {
             font-size: 12px;
             margin-bottom: 4px;
-            line-height: 1.4em; /* 行高さを明示的に設定 */
+            line-height: 1.4em;
+            word-break: break-word;
+            white-space: normal;
         }
         .history-actions {
             margin-top: 8px;
@@ -416,8 +429,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             margin-bottom: 4px;
         }
         .action-status.success { color: var(--vscode-terminal-ansiGreen); }
-        .action-status.failure { color: var(--vscode-terminal-ansiRed); }
-.action-status.warning { color: var(--vscode-terminal-ansiYellow); }
+        .action-status.failure { color: var(--vscode-errorForeground); }
+        .action-status.warning { color: var(--vscode-terminal-ansiYellow); }
         .action-status.skipped { color: var(--vscode-descriptionForeground); }
         .action-status.info { color: var(--vscode-terminal-ansiBlue); } /* infoカラー追加 */
 
@@ -787,7 +800,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             historyList.querySelectorAll('.history-header').forEach(header => {
                 header.addEventListener('click', (e) => {
                     const item = header.closest('.history-item');
-                    item.dataset.expanded = item.dataset.expanded === 'true' ? 'false' : 'true';
+                    const content = item.querySelector('.history-content');
+                    if (item.dataset.expanded === 'true') {
+                        item.dataset.expanded = 'false';
+                        content.style.maxHeight = '0'; // 折りたたむ
+                    } else {
+                        item.dataset.expanded = 'true';
+                        // content.scrollHeight は要素の全高さを返す。
+                        // これを max-height に設定することで、内容の高さに完全に合わせられる。
+                        content.style.maxHeight = content.scrollHeight + 'px'; // 内容の高さに合わせて展開
+                    }
                 });
             });
         }
@@ -799,6 +821,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'warning': return '!';
                 case 'skipped': return '-';
                 case 'pending': return '…';
+                case 'info': return 'ⓘ'; // Infoアイコンを追加
                 default: return '';
             }
         }
@@ -815,9 +838,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case 'error': description = 'エラー: ' + action.message; break;
                 case 'warning': description = '警告: ' + action.message; break;
                 case 'none': description = 'アクションなし: ' + action.message; break;
+                case 'add_file_to_context': description = 'ファイルをコンテキストに追加: ' + action.target; break;
+                case 'clear_context': description = 'コンテキストをクリア'; break;
+                case 'confirm_apply': description = '変更を適用'; break;
+                case 'remove_file': description = 'ファイルをコンテキストから削除: ' + action.target; break;
+                case 'set_mode': description = 'モード設定: ' + action.target; break;
+                case 'set_task_type': description = 'タスク種別設定: ' + action.target; break;
+                case 'set_instruction': description = '指示設定'; break;
+                case 'set_system_prompt_level': description = 'システムプロンプトレベル設定: ' + action.target; break;
                 default: description = '不明なアクション: ' + action.actionType; break;
             }
-            return description + (action.message && action.actionType !== 'error' && action.actionType !== 'warning' ? ' (' + action.message + ')' : '');
+            return description + (action.message && action.actionType !== 'error' && action.actionType !== 'warning' && action.status !== 'success' ? ' (' + action.message + ')' : '');
         }
 
         function getUserActionTitle(actionType) {

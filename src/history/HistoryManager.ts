@@ -47,7 +47,7 @@ export interface ActionDetail {
 
 export class HistoryManager {
     private history: HistoryEntry[] = [];
-    private maxEntries = 20; // 保持する履歴の最大数
+    private maxEntries = 120; // 保持する履歴の最大数
 
     public addEntry(entry: HistoryEntry) {
         this.history.unshift(entry); // 新しいものを先頭に追加
