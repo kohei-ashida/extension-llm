@@ -39,8 +39,8 @@ const vscode = __importStar(require("vscode"));
 const SidebarProvider_1 = require("./providers/SidebarProvider");
 const ContextManager_1 = require("./context/ContextManager");
 const PromptGenerator_1 = require("./prompt/PromptGenerator");
-const ResponseParser_1 = require("./parsers/ResponseParser");
-const HistoryManager_1 = require("./history/HistoryManager"); // UserActionDetailsをインポート
+const ResponseParser_1 = require("./parsers/ResponseParser"); // ParseResultをResponseParserから直接インポート
+const HistoryManager_1 = require("./history/HistoryManager"); // HistoryManager関連をインポート
 let outputChannel; // グローバルでOutputChannelを宣言
 function activate(context) {
     console.log('LLM Copilot Bridge is now active!');
@@ -149,12 +149,14 @@ function activate(context) {
         outputChannel.appendLine('--- LLM Response ---');
         outputChannel.appendLine(response);
         outputChannel.appendLine('--------------------');
-        const result = await responseParser.parseAndApply(response);
+        const result = await responseParser.parseAndApply(response); // ResponseParserのParseResult型を使用
         const actionsTaken = [];
-        let overallSuccess = result.success;
+        let overallSuccess = result.status === 'success'; // statusから判断
         let errorMessage = result.error;
         outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ResponseParser.parseAndApply 結果: success=${result.success}, error=${result.error}`);
+        outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ResponseParser.parseAndApply 結果: status=${result.status}`); // statusもログに出力
         console.log(`[LLM Bridge] ResponseParser.parseAndApply 結果: success=${result.success}, error=${result.error}`);
+        console.log(`[LLM Bridge] ResponseParser.parseAndApply 結果: status=${result.status}`);
         outputChannel.appendLine(`  - ファイル変更数: ${result.filesModified}`);
         outputChannel.appendLine(`  - ファイルリクエスト: ${result.requestedFiles ? result.requestedFiles.length : 0}件`);
         outputChannel.appendLine(`  - モード切り替えリクエスト: ${result.switchModeTo || 'なし'}`);
@@ -163,15 +165,23 @@ function activate(context) {
         console.log(`[LLM Bridge]   - ファイルリクエスト: ${result.requestedFiles ? result.requestedFiles.length : 0}件`);
         console.log(`[LLM Bridge]   - モード切り替えリクエスト: ${result.switchModeTo || 'なし'}`);
         console.log(`[LLM Bridge]   - 続きを要求: ${result.continueRequested ? 'はい' : 'いいえ'}`);
-        if (result.success) {
-            // LLMからのリクエストを処理
-            if (result.switchModeTo) { // モード切り替えが最優先
+        if (result.status === 'pending') { // プレビュー中の場合
+            vscode.window.showInformationMessage('変更内容をプレビュー表示中。確認後、コマンド「LLM Bridge: 変更を適用」を実行してください。');
+            outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 処理分岐: プレビュー表示中。`);
+            console.log(`[LLM Bridge] 処理分岐: プレビュー表示中。`);
+            actionsTaken.push({ actionType: 'none', status: 'pending', message: result.error }); // errorはundefinedだがメッセージとして利用
+        }
+        else if (result.status === 'success' || result.status === 'failure') { // 成功または失敗の場合
+            if (result.status === 'failure') {
+                overallSuccess = false;
+            }
+            if (result.switchModeTo) { // モード切り替えが最優先 (成功時のみ)
                 outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 処理分岐: モード切り替えリクエストを検出。`);
                 console.log(`[LLM Bridge] 処理分岐: モード切り替えリクエストを検出。`);
                 contextManager.setMode(result.switchModeTo); // モード切り替え
                 outputChannel.appendLine(`[${new Date().toLocaleTimeString()}]   モードを ${result.switchModeTo} に設定しました。`);
                 console.log(`[LLM Bridge]   モードを ${result.switchModeTo} に設定しました。`);
-                actionsTaken.push({ actionType: 'mode_switch', target: result.switchModeTo, status: 'success' });
+                actionsTaken.push({ actionType: 'mode_switch', target: result.switchModeTo, status: result.status });
                 // モード切り替えに伴いリクエストされたファイルがある場合もここで処理
                 if (result.requestedFiles && result.requestedFiles.length > 0) {
                     for (const filePath of result.requestedFiles) {
@@ -195,10 +205,10 @@ function activate(context) {
                 outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 新しいプロンプトをクリップボードにコピーしました。`);
                 console.log(`[LLM Bridge] 新しいプロンプトをクリップボードにコピーしました。`);
             }
-            else if (result.requestedFiles && result.requestedFiles.length > 0) { // 次にファイルリクエスト
+            else if (result.requestedFiles && result.requestedFiles.length > 0) { // 次にファイルリクエスト (成功時のみ)
                 outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 処理分岐: ファイルリクエストを検出。`);
                 console.log(`[LLM Bridge] 処理分岐: ファイルリクエストを検出。`);
-                for (const filePath of result.requestedFiles) {
+                for (const filePath of result.requestedFiles) { // 正しい構文 for ... of
                     outputChannel.appendLine(`[${new Date().toLocaleTimeString()}]   ファイルをコンテキストに追加: ${filePath}`);
                     console.log(`[LLM Bridge]   ファイルをコンテキストに追加: ${filePath}`);
                     try {
@@ -235,7 +245,7 @@ function activate(context) {
                 vscode.window.showInformationMessage(`${result.filesModified}個のファイルを更新しました`);
                 // ファイル変更はapplyAllChangesでまとめて処理されるため、ここでは個別のActionDetailを記録しない
                 // applyAllChangesの成功/失敗を記録する
-                actionsTaken.push({ actionType: 'file_modify', target: `${result.filesModified} files`, status: 'pending', message: 'ユーザー確認待ち' });
+                actionsTaken.push({ actionType: 'file_modify', target: `${result.filesModified} files`, status: result.status, message: 'ユーザー確認待ち' });
             }
             else {
                 outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 処理分岐: 変更/リクエストなし。`);
@@ -244,7 +254,7 @@ function activate(context) {
                 actionsTaken.push({ actionType: 'none', message: '適用可能な変更/リクエストなし', status: 'skipped' });
             }
         }
-        else {
+        else if (result.status === 'failure') { // 失敗の場合
             outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 処理分岐: エラーを検出。`);
             console.log(`[LLM Bridge] 処理分岐: エラーを検出。`);
             if (result.error) {
@@ -252,21 +262,13 @@ function activate(context) {
             }
             actionsTaken.push({ actionType: 'error', status: 'failure', message: result.error });
             overallSuccess = false;
-        }
+        } // 'pending'の場合は何もしない (メッセージはshowFileChangePreviewが出す)
         outputChannel.appendLine('========================================');
         console.log('========================================');
         // LLM応答適用結果を履歴に追加
         const responseAppliedDetails = {
             llmResponse: response,
-            parseResult: {
-                success: result.success,
-                error: result.error,
-                filesModified: result.filesModified,
-                requestedFiles: result.requestedFiles,
-                switchModeTo: result.switchModeTo,
-                continueRequested: result.continueRequested,
-                requestReason: result.requestReason,
-            },
+            parseResult: { ...result }, // resultオブジェクト全体をコピーして、changesプロパティも含む
             actionsTaken: actionsTaken,
             overallSuccess: overallSuccess,
             errorMessage: errorMessage,
@@ -325,9 +327,9 @@ function activate(context) {
         console.log(`[LLM Bridge] 保留中の変更を適用中...`);
         const result = await responseParser.confirmAndApply();
         const actionsTaken = [];
-        let overallSuccess = result.success;
+        let overallSuccess = result.status === 'success';
         let errorMessage = result.error;
-        if (result.success) {
+        if (result.status === 'success') {
             vscode.window.showInformationMessage(`${result.filesModified}個のファイルを更新しました`);
             outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 保留中の変更を適用しました: ${result.filesModified}個のファイルを更新。`);
             console.log(`[LLM Bridge] 保留中の変更を適用しました: ${result.filesModified}個のファイルを更新。`);
@@ -338,11 +340,11 @@ function activate(context) {
                 message: '変更適用済',
             }));
         }
-        else if (result.error) {
-            vscode.window.showWarningMessage(result.error);
+        else if (result.status === 'failure') {
+            vscode.window.showWarningMessage(result.error ?? '変更の適用に失敗しました');
             outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 保留中の変更の適用に失敗: ${result.error}`);
             console.log(`[LLM Bridge] 保留中の変更の適用に失敗: ${result.error}`);
-            actionsTaken.push({ actionType: 'error', status: 'failure', message: result.error });
+            actionsTaken.push({ actionType: 'error', status: 'failure', message: result.error ?? '不明なエラー' }); // エラーメッセージを追加
             overallSuccess = false;
         }
         outputChannel.appendLine('========================================');
@@ -354,7 +356,7 @@ function activate(context) {
                 actionType: 'confirm_apply',
                 target: `${result.filesModified} files`,
                 status: overallSuccess ? 'success' : 'failure',
-                message: overallSuccess ? '変更を適用しました' : `変更の適用に失敗: ${errorMessage}`,
+                message: overallSuccess ? '変更を適用しました' : `変更の適用に失敗: ${errorMessage ?? '不明なエラー'}`,
             }
         });
         sidebarProvider.refresh(); // サイドバーの履歴を更新

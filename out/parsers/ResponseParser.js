@@ -55,13 +55,13 @@ class ResponseParser {
             return {
                 ...parsedResult,
                 filesModified: 0,
-                success: true, // リクエストが有効なため成功とする
+                status: 'success', // リクエストが有効なため成功とする
             };
         }
         // ファイル変更がない場合は、エラーを返す
         if (parsedResult.changes.length === 0) {
             return {
-                success: false,
+                status: 'failure',
                 filesModified: 0,
                 error: '適用可能なコード変更が見つかりませんでした',
                 changes: [],
@@ -75,7 +75,7 @@ class ResponseParser {
         });
         const action = await vscode.window.showQuickPick([
             { label: '$(check) すべて適用', description: `${parsedResult.changes.length}件の変更`, action: 'apply' },
-            { label: '$(diff) 変更内容を確認', description: 'diffエディタで確認してから適用', action: 'preview' },
+            { label: '$(diff) 変更内容を確認', description: 'エディタで確認してから適用', action: 'preview' },
             { label: '$(close) キャンセル', action: 'cancel' },
         ], {
             placeHolder: `${parsedResult.changes.length}件のファイル変更が検出されました`,
@@ -83,24 +83,25 @@ class ResponseParser {
         });
         if (!action || action.action === 'cancel') {
             return {
-                success: false,
+                status: 'failure',
                 filesModified: 0,
                 error: 'ユーザーがキャンセルしました',
                 changes: [],
             };
         }
         if (action.action === 'preview') {
-            // プレビューモード: 各ファイルのdiffを表示し、最後に確認
-            await this.showDiffPreview(parsedResult.changes);
+            // プレビューモード: 各ファイルの変更内容を表示し、最後に確認
+            await this.showFileChangePreview(parsedResult.changes);
             return {
-                success: false,
+                status: 'pending', // プレビュー中は保留状態
                 filesModified: 0,
-                error: 'プレビュー表示中。確認後、再度「回答を適用」を実行してください。',
+                error: undefined, // プレビューはエラーではない
                 changes: [],
             };
         }
         // 変更を適用
-        return await this.applyAllChanges(parsedResult.changes);
+        const applyResult = await this.applyAllChanges(parsedResult.changes);
+        return { ...applyResult, status: applyResult.success ? 'success' : 'failure' };
     }
     /**
      * 保留中の変更を確認して適用
@@ -108,13 +109,14 @@ class ResponseParser {
     async confirmAndApply() {
         if (this.pendingChanges.length === 0) {
             return {
-                success: false,
+                status: 'failure',
                 filesModified: 0,
                 error: '保留中の変更がありません',
                 changes: [],
             };
         }
-        return await this.applyAllChanges(this.pendingChanges);
+        const applyResult = await this.applyAllChanges(this.pendingChanges);
+        return { ...applyResult, status: applyResult.success ? 'success' : 'failure' };
     }
     /**
      * すべての変更を適用
@@ -127,6 +129,7 @@ class ResponseParser {
             this.pendingChanges = [];
             return {
                 success: true,
+                status: 'success', // ここで成功として設定
                 filesModified: changes.length,
                 changes,
             };
@@ -134,6 +137,7 @@ class ResponseParser {
         catch (error) {
             return {
                 success: false,
+                status: 'failure', // ここで失敗として設定
                 filesModified: 0,
                 error: error instanceof Error ? error.message : String(error),
                 changes: [],
@@ -285,7 +289,7 @@ class ResponseParser {
             }
         }
         return {
-            success: true, // パース自体は成功
+            status: 'success', // パース自体は成功
             filesModified: changes.length, // パース時点での変更数
             changes,
             requestedFiles: requestedFiles.length > 0 ? requestedFiles : undefined, // 空配列の場合はundefinedに戻す
@@ -294,11 +298,10 @@ class ResponseParser {
             requestReason,
         };
     }
-    // --- applyUnifiedDiff メソッドは完全に削除 ---
     /**
-     * Diffプレビューを表示 (非モーダル)
+     * ファイル変更のプレビューを表示 (非モーダル)
      */
-    async showDiffPreview(changes) {
+    async showFileChangePreview(changes) {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
             vscode.window.showErrorMessage('ワークスペースが開かれていません');
@@ -310,7 +313,7 @@ class ResponseParser {
             await fs.promises.mkdir(tmpBase, { recursive: true });
         }
         this.tempDir = tmpBase;
-        // 各変更のdiffを表示
+        // 各変更のプレビューを表示
         for (let i = 0; i < changes.length; i++) {
             const change = changes[i];
             const fullPath = path.isAbsolute(change.filePath)
@@ -321,22 +324,27 @@ class ResponseParser {
             await fs.promises.writeFile(tempFilePath, change.content, 'utf-8');
             const tempUri = vscode.Uri.file(tempFilePath);
             if (change.type === 'delete') {
-                // 削除の場合は元ファイルを表示
+                // 削除の場合は元ファイルを表示し、警告
                 if (fs.existsSync(fullPath)) {
-                    const doc = await vscode.workspace.openTextDocument(fullPath);
-                    await vscode.window.showTextDocument(doc, { preview: false });
-                    vscode.window.showWarningMessage(`このファイルは削除されます: ${change.filePath}`);
+                    const originalUri = vscode.Uri.file(fullPath);
+                    // 削除前のファイル内容をエディタで表示
+                    await vscode.window.showTextDocument(originalUri, { preview: false });
+                    vscode.window.showWarningMessage(`このファイルは削除されます: ${change.filePath}。エディタで削除される内容を確認してください。`);
+                }
+                else {
+                    vscode.window.showWarningMessage(`削除対象ファイルが見つかりませんでした: ${change.filePath}。`);
                 }
             }
-            else if (fs.existsSync(fullPath)) {
-                // 既存ファイルの変更 -> diffを表示
-                const originalUri = vscode.Uri.file(fullPath);
-                await vscode.commands.executeCommand('vscode.diff', originalUri, tempUri, `${change.filePath}: 変更プレビュー (${i + 1}/${changes.length})`);
-            }
-            else {
-                // 新規ファイル -> そのまま表示
+            else if (change.type === 'create') {
+                // 新規作成の場合は一時ファイルをそのまま表示
                 const doc = await vscode.workspace.openTextDocument(tempUri);
                 await vscode.window.showTextDocument(doc, { preview: false });
+                vscode.window.showInformationMessage(`新規ファイルが作成されます: ${change.filePath}。エディタで作成される内容を確認してください。`);
+            }
+            else { // modify の場合
+                // 既存ファイルの変更 -> diffを表示
+                const originalUri = vscode.Uri.file(fullPath);
+                await vscode.commands.executeCommand('vscode.diff', originalUri, tempUri, `${change.filePath}: 変更の差分プレビュー (${i + 1}/${changes.length})`);
             }
         }
         // ステータスバーで案内
@@ -351,7 +359,7 @@ class ResponseParser {
         setTimeout(() => {
             statusBarItem.dispose();
         }, 10000);
-        vscode.window.showInformationMessage(`${changes.length}件の変更をプレビュー中。確認後、コマンド「LLM Bridge: 変更を適用」を実行してください。`, '変更を適用').then(result => {
+        vscode.window.showInformationMessage(`${changes.length}件のファイル変更内容をプレビュー表示中。確認後、コマンド「LLM Bridge: 変更を適用」を実行してください。`, '変更を適用').then(result => {
             if (result === '変更を適用') {
                 vscode.commands.executeCommand('llmBridge.confirmApply');
             }

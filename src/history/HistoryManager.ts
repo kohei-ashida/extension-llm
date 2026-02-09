@@ -16,15 +16,7 @@ export interface PromptGeneratedDetails {
 
 export interface ResponseAppliedDetails {
     llmResponse: string; // LLMからの生応答
-    parseResult: {
-        success: boolean;
-        error?: string;
-        filesModified: number;
-        requestedFiles?: string[];
-        switchModeTo?: 'browse' | 'edit';
-        continueRequested?: boolean;
-        requestReason?: string;
-    }; // ResponseParserの結果の要約
+    parseResult: import('../parsers/ResponseParser').ParseResult; // ResponseParserのParseResult型を参照
     actionsTaken: ActionDetail[]; // 実行されたアクションの詳細
     overallSuccess: boolean;
     errorMessage?: string; // 全体的なエラーメッセージ
@@ -47,7 +39,7 @@ export interface ActionDetail {
 
 export class HistoryManager {
     private history: HistoryEntry[] = [];
-    private maxEntries = 120; // 保持する履歴の最大数
+    private maxEntries = 20; // 保持する履歴の最大数
 
     public addEntry(entry: HistoryEntry) {
         this.history.unshift(entry); // 新しいものを先頭に追加
