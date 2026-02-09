@@ -246,7 +246,7 @@ const MINIMAL_SYSTEM_PROMPT = `# あなたはコーディングアシスタン�
 >>>>>>> REPLACE
 <<<END>>>
 \`\`\`
-**\\\`<<<REPLACE_SECTION>>>\\\` のルール:** \`SEARCH\`の内容は完全に一致、各ブロックは最初のマッチのみ置換、ブロックは簡潔に。
+**\\\`<<<REPLACE_SECTION>>>\\\` のルール:** \\\`SEARCH\\\`の内容は完全に一致、各ブロックは最初のマッチのみ置換、ブロックは簡潔に。
 
 #### ファイル削除
 \`\`\`
@@ -402,39 +402,51 @@ class PromptGenerator {
         if (fullPrompt.length <= charLimit) {
             return [fullPrompt];
         }
-        // システムプロンプトとファイル内容を分離
         const parts = [];
         const systemPromptEnd = fullPrompt.indexOf('## 提供ファイル');
-        if (systemPromptEnd === -1) {
-            // ファイルがない場合は分割不要
-            return [fullPrompt];
+        let headerPart = '';
+        let filesPart = '';
+        if (systemPromptEnd !== -1) {
+            headerPart = fullPrompt.substring(0, systemPromptEnd);
+            filesPart = fullPrompt.substring(systemPromptEnd);
         }
-        const headerPart = fullPrompt.substring(0, systemPromptEnd);
-        const filesPart = fullPrompt.substring(systemPromptEnd);
-        // ファイルを個別に分割
-        const fileBlocks = this.splitFileBlocks(filesPart);
-        let currentPart = headerPart;
-        let partIndex = 0;
-        const estimatedTotalParts = Math.ceil(fullPrompt.length / charLimit) + 1;
-        for (const block of fileBlocks) {
-            if (currentPart.length + block.length > charLimit && currentPart !== headerPart) {
-                // 現在のパートを保存
-                partIndex++;
-                parts.push(getPartHeader(partIndex, estimatedTotalParts) + currentPart);
+        else {
+            // 提供ファイルセクションがない場合、全体をヘッダーとして扱う
+            headerPart = fullPrompt;
+        }
+        let currentPart = '';
+        // ヘッダー部分を処理
+        const headerLines = headerPart.split('\n');
+        for (const line of headerLines) {
+            const lineWithNewline = line + '\n';
+            if ((currentPart + lineWithNewline).length > charLimit && currentPart !== '') {
+                parts.push(currentPart);
                 currentPart = '';
             }
-            currentPart += block;
+            currentPart += lineWithNewline;
+        }
+        // 各ファイルブロックを処理
+        const fileBlocks = this.splitFileBlocks(filesPart);
+        for (const fileBlock of fileBlocks) {
+            const blockLines = fileBlock.split('\n');
+            for (const line of blockLines) {
+                const lineWithNewline = line + '\n';
+                if ((currentPart + lineWithNewline).length > charLimit && currentPart !== '') {
+                    parts.push(currentPart);
+                    currentPart = '';
+                }
+                currentPart += lineWithNewline;
+            }
         }
         // 最後のパート
         if (currentPart) {
-            partIndex++;
-            parts.push(getPartHeader(partIndex, partIndex) + currentPart);
+            parts.push(currentPart);
         }
-        // パート番号を修正
+        // パート番号を修正 (全体のパート数が確定してから)
+        const totalParts = parts.length;
         return parts.map((part, i) => {
-            const total = parts.length;
-            return part.replace(/パート \d+\/\d+/, `パート ${i + 1}/${total}`)
-                .replace(/これで最後です/, i === total - 1 ? 'これで最後です' : '続きがあります');
+            const header = getPartHeader(i + 1, totalParts);
+            return header + part;
         });
     }
     /**
@@ -462,7 +474,7 @@ class PromptGenerator {
     async checkCharLimit() {
         const config = vscode.workspace.getConfiguration('llmBridge');
         const limit = config.get('inputCharLimit', 4000);
-        const prompt = await this.generate();
+        const prompt = await this.generate(); // generate()はフルプロンプトを返す
         const parts = Math.ceil(prompt.length / limit);
         return {
             current: prompt.length,

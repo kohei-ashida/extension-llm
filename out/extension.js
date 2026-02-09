@@ -61,30 +61,66 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('llmBridge.generatePrompt', async () => {
         outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] --- COMMAND: generatePrompt ---`);
         console.log(`[LLM Bridge] --- COMMAND: generatePrompt ---`);
-        const prompt = await promptGenerator.generate();
-        await vscode.env.clipboard.writeText(prompt);
-        vscode.window.showInformationMessage(`プロンプトをクリップボードにコピーしました (${prompt.length}文字)`);
-        outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] プロンプト生成 (${prompt.length}文字)`);
-        console.log(`[LLM Bridge] プロンプト生成 (${prompt.length}文字)`);
-        outputChannel.appendLine('--- Generated Prompt (truncated to 500 chars) ---');
-        outputChannel.appendLine(prompt.substring(0, 500) + (prompt.length > 500 ? '\n...(truncated)' : ''));
-        outputChannel.appendLine('--------------------------------------------------');
-        // 履歴に追加
-        const promptGeneratedDetails = {
-            promptSummary: prompt.substring(0, 200) + (prompt.length > 200 ? '...' : ''),
-            fullPromptLength: prompt.length,
-            mode: contextManager.getMode(),
-            systemPromptLevel: promptGenerator.getSystemPromptLevel(),
-            taskType: promptGenerator.getTaskType(),
-            filesInContext: contextManager.getFiles().map(f => f.relativePath),
-            instruction: contextManager.getInstruction(),
-        };
-        historyManager.addEntry({
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'prompt_generated',
-            details: promptGeneratedDetails,
-        });
-        sidebarProvider.refresh(); // サイドバーの履歴を更新
+        try {
+            const limitResult = await promptGenerator.checkCharLimit(); // 文字数制限をチェック
+            let generatedPrompt = '';
+            if (limitResult.exceeded) {
+                // 分割送信が必要
+                const parts = await promptGenerator.generateSplit(limitResult.limit);
+                if (parts.length > 0) {
+                    generatedPrompt = parts[0];
+                    await vscode.env.clipboard.writeText(generatedPrompt);
+                    vscode.window.showInformationMessage(`パート 1/${parts.length} をクリップボードにコピーしました (${generatedPrompt.length}文字)`);
+                    sidebarProvider.postMessageToWebview({
+                        type: 'splitPromptGenerated',
+                        totalParts: parts.length,
+                        currentPart: 1
+                    });
+                    outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 分割プロンプト パート 1/${parts.length} をクリップボードにコピーしました (${generatedPrompt.length}文字)`);
+                    console.log(`[LLM Bridge] 分割プロンプト パート 1/${parts.length} をクリップボードにコピーしました (${generatedPrompt.length}文字)`);
+                }
+                else {
+                    // プロンプト生成に失敗したがエラーがスローされなかった場合
+                    vscode.window.showErrorMessage('プロンプト生成に失敗しました (空のプロンプトが生成されました)。');
+                    outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] エラー: プロンプト生成に失敗しました (空のプロンプト)。`);
+                    console.error(`[LLM Bridge] エラー: プロンプト生成に失敗しました (空のプロンプト)。`);
+                    return; // 履歴に追加せずに終了
+                }
+            }
+            else {
+                // 分割不要
+                generatedPrompt = await promptGenerator.generate();
+                await vscode.env.clipboard.writeText(generatedPrompt);
+                vscode.window.showInformationMessage(`プロンプトをクリップボードにコピーしました (${generatedPrompt.length}文字)`);
+                sidebarProvider.postMessageToWebview({ type: 'promptCopied' }); // UIフィードバック用
+                outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] プロンプト生成 (${generatedPrompt.length}文字)`);
+                console.log(`[LLM Bridge] プロンプト生成 (${generatedPrompt.length}文字)`);
+                outputChannel.appendLine('--- Generated Prompt (truncated to 500 chars) ---');
+                outputChannel.appendLine(generatedPrompt.substring(0, 500) + (generatedPrompt.length > 500 ? '\n...(truncated)' : ''));
+                outputChannel.appendLine('--------------------------------------------------');
+            }
+            // 履歴に追加
+            const promptGeneratedDetails = {
+                promptSummary: generatedPrompt.substring(0, 200) + (generatedPrompt.length > 200 ? '...' : ''),
+                fullPromptLength: generatedPrompt.length,
+                mode: contextManager.getMode(),
+                systemPromptLevel: promptGenerator.getSystemPromptLevel(),
+                taskType: promptGenerator.getTaskType(),
+                filesInContext: contextManager.getFiles().map(f => f.relativePath),
+                instruction: contextManager.getInstruction(),
+            };
+            historyManager.addEntry({
+                timestamp: new Date().toLocaleTimeString(),
+                type: 'prompt_generated',
+                details: promptGeneratedDetails,
+            });
+            sidebarProvider.refresh(); // サイドバーの履歴を更新
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`プロンプト生成に失敗: ${error instanceof Error ? error.message : String(error)}`);
+            outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] エラー: プロンプト生成に失敗: ${error instanceof Error ? error.message : String(error)}`);
+            console.error(`[LLM Bridge] エラー: プロンプト生成に失敗: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }));
     context.subscriptions.push(vscode.commands.registerCommand('llmBridge.setSystemPromptLevel', (level) => {
         outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] --- COMMAND: setSystemPromptLevel ---`);
@@ -113,8 +149,8 @@ function activate(context) {
         outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] --- COMMAND: generateSplitPromptPart (${partIndex}) ---`);
         console.log(`[LLM Bridge] --- COMMAND: generateSplitPromptPart (${partIndex}) ---`);
         try {
-            const result = await promptGenerator.checkCharLimit();
-            const parts = await promptGenerator.generateSplit(result.limit);
+            const limitResult = await promptGenerator.checkCharLimit();
+            const parts = await promptGenerator.generateSplit(limitResult.limit);
             if (partIndex >= 0 && partIndex < parts.length) {
                 await vscode.env.clipboard.writeText(parts[partIndex]);
                 vscode.window.showInformationMessage(`パート ${partIndex + 1}/${parts.length} をコピーしました (${parts[partIndex].length}文字)`);
