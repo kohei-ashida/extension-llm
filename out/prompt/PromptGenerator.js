@@ -1,40 +1,6 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PromptGenerator = void 0;
-const vscode = __importStar(require("vscode"));
 const TEMPLATES = {
     general: {
         name: '汎用',
@@ -110,7 +76,7 @@ const FULL_SYSTEM_PROMPT = `# あなたはコーディングアシスタント�
 
 ### コード変更がある場合
 
-ファイルを変更する場合は、**以下のいずれかの形式（ファイル全体の置換、新規ファイル作成、または部分置換）** で回答してください。
+ファイルを変更する場合は、**以下のいずれかの形式（ファイル全体の置換または新規ファイル作成）** で回答してください。
 **部分的な変更（Diff形式）はサポートしていません**。
 
 #### 全体置換 (ファイル全体を書き換える場合)
@@ -246,7 +212,7 @@ const MINIMAL_SYSTEM_PROMPT = `# あなたはコーディングアシスタン�
 >>>>>>> REPLACE
 <<<END>>>
 \`\`\`
-**\\\`<<<REPLACE_SECTION>>>\\\` のルール:** \\\`SEARCH\\\`の内容は完全に一致、各ブロックは最初のマッチのみ置換、ブロックは簡潔に。
+**\\\`<<<REPLACE_SECTION>>>\\\` のルール:** \`SEARCH\`の内容は完全に一致、各ブロックは最初のマッチのみ置換、ブロックは簡潔に。
 
 #### ファイル削除
 \`\`\`
@@ -313,7 +279,8 @@ ${partNumber < totalParts ? '（続きがあります。すべて受け取って
 class PromptGenerator {
     constructor(contextManager) {
         this.taskType = 'general';
-        this.systemPromptLevel = 'full'; // 新しいプロパティ
+        this.systemPromptLevel = 'full';
+        this.inputCharLimit = 4000; // 新しいプロパティ
         this.contextManager = contextManager;
     }
     /**
@@ -348,6 +315,19 @@ class PromptGenerator {
      */
     getSystemPromptLevel() {
         return this.systemPromptLevel;
+    }
+    /**
+     * 入力文字数制限を設定
+     */
+    setInputCharLimit(limit) {
+        // 最小値や最大値を設定することも検討
+        this.inputCharLimit = Math.max(100, limit); // 最低100文字
+    }
+    /**
+     * 入力文字数制限を取得
+     */
+    getInputCharLimit() {
+        return this.inputCharLimit;
     }
     /**
      * プロンプトを生成
@@ -419,11 +399,17 @@ class PromptGenerator {
         const headerLines = headerPart.split('\n');
         for (const line of headerLines) {
             const lineWithNewline = line + '\n';
+            // 現在のパートと行を結合するとcharLimitを超える場合、現在のパートを保存
             if ((currentPart + lineWithNewline).length > charLimit && currentPart !== '') {
                 parts.push(currentPart);
                 currentPart = '';
             }
             currentPart += lineWithNewline;
+            // 1行がcharLimitを超える場合、その行自体を分割する
+            while (currentPart.length > charLimit) {
+                parts.push(currentPart.substring(0, charLimit));
+                currentPart = currentPart.substring(charLimit);
+            }
         }
         // 各ファイルブロックを処理
         const fileBlocks = this.splitFileBlocks(filesPart);
@@ -431,11 +417,17 @@ class PromptGenerator {
             const blockLines = fileBlock.split('\n');
             for (const line of blockLines) {
                 const lineWithNewline = line + '\n';
+                // 現在のパートと行を結合するとcharLimitを超える場合、現在のパートを保存
                 if ((currentPart + lineWithNewline).length > charLimit && currentPart !== '') {
                     parts.push(currentPart);
                     currentPart = '';
                 }
                 currentPart += lineWithNewline;
+                // 1行がcharLimitを超える場合、その行自体を分割する
+                while (currentPart.length > charLimit) {
+                    parts.push(currentPart.substring(0, charLimit));
+                    currentPart = currentPart.substring(charLimit);
+                }
             }
         }
         // 最後のパート
@@ -472,8 +464,7 @@ class PromptGenerator {
      * 文字数制限をチェック
      */
     async checkCharLimit() {
-        const config = vscode.workspace.getConfiguration('llmBridge');
-        const limit = config.get('inputCharLimit', 4000);
+        const limit = this.inputCharLimit; // プロパティから取得
         const prompt = await this.generate(); // generate()はフルプロンプトを返す
         const parts = Math.ceil(prompt.length / limit);
         return {

@@ -138,6 +138,34 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('llmBridge.setInputCharLimit', (limit: number) => {
+            outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] --- COMMAND: setInputCharLimit ---`);
+            console.log(`[LLM Bridge] --- COMMAND: setInputCharLimit ---`);
+            promptGenerator.setInputCharLimit(limit);
+            // vscode.workspace.getConfiguration('llmBridge').update('inputCharLimit', limit, vscode.ConfigurationTarget.Global); // 設定に保存することも可能
+            sidebarProvider.refresh(); // UIを更新して変更を反映
+            vscode.window.showInformationMessage(`文字数上限を ${limit} に設定しました。`);
+            outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 文字数上限を ${limit} に設定しました。`);
+            console.log(`[LLM Bridge] 文字数上限を ${limit} に設定しました。`);
+            outputChannel.appendLine('========================================');
+            console.log('========================================');
+
+            // 履歴に追加
+            historyManager.addEntry({
+                timestamp: new Date().toLocaleTimeString(),
+                type: 'user_action',
+                details: {
+                    actionType: 'set_input_char_limit',
+                    target: limit.toString(),
+                    status: 'success',
+                    message: `文字数上限を ${limit} に設定`,
+                }
+            });
+            sidebarProvider.refresh(); // サイドバーの履歴を更新
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('llmBridge.generateSplitPromptPart', async (partIndex: number) => {
             outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] --- COMMAND: generateSplitPromptPart (${partIndex}) ---`);
             console.log(`[LLM Bridge] --- COMMAND: generateSplitPromptPart (${partIndex}) ---`);
@@ -248,7 +276,7 @@ export function activate(context: vscode.ExtensionContext) {
                 } else if (result.requestedFiles && result.requestedFiles.length > 0) { // 次にファイルリクエスト (成功時のみ)
                     outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] 処理分岐: ファイルリクエストを検出。`);
                     console.log(`[LLM Bridge] 処理分岐: ファイルリクエストを検出。`);
-                    for (const filePath of result.requestedFiles) { // 正しい構文 for ... of
+                    for (const filePath of result.requestedFiles) {
                         outputChannel.appendLine(`[${new Date().toLocaleTimeString()}]   ファイルをコンテキストに追加: ${filePath}`);
                         console.log(`[LLM Bridge]   ファイルをコンテキストに追加: ${filePath}`);
                         try {

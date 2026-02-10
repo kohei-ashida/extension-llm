@@ -84,7 +84,7 @@ const FULL_SYSTEM_PROMPT = `# あなたはコーディングアシスタント�
 
 ### コード変更がある場合
 
-ファイルを変更する場合は、**以下のいずれかの形式（ファイル全体の置換、新規ファイル作成、または部分置換）** で回答してください。
+ファイルを変更する場合は、**以下のいずれかの形式（ファイル全体の置換または新規ファイル作成）** で回答してください。
 **部分的な変更（Diff形式）はサポートしていません**。
 
 #### 全体置換 (ファイル全体を書き換える場合)
@@ -221,7 +221,7 @@ const MINIMAL_SYSTEM_PROMPT = `# あなたはコーディングアシスタン�
 >>>>>>> REPLACE
 <<<END>>>
 \`\`\`
-**\\\`<<<REPLACE_SECTION>>>\\\` のルール:** \\\`SEARCH\\\`の内容は完全に一致、各ブロックは最初のマッチのみ置換、ブロックは簡潔に。
+**\\\`<<<REPLACE_SECTION>>>\\\` のルール:** \`SEARCH\`の内容は完全に一致、各ブロックは最初のマッチのみ置換、ブロックは簡潔に。
 
 #### ファイル削除
 \`\`\`
@@ -290,7 +290,8 @@ ${partNumber < totalParts ? '（続きがあります。すべて受け取って
 export class PromptGenerator {
     private contextManager: ContextManager;
     private taskType: TaskType = 'general';
-    private systemPromptLevel: 'full' | 'minimal' = 'full'; // 新しいプロパティ
+    private systemPromptLevel: 'full' | 'minimal' = 'full';
+    private inputCharLimit: number = 4000; // 新しいプロパティ
 
     constructor(contextManager: ContextManager) {
         this.contextManager = contextManager;
@@ -334,6 +335,20 @@ export class PromptGenerator {
         return this.systemPromptLevel;
     }
 
+    /**
+     * 入力文字数制限を設定
+     */
+    setInputCharLimit(limit: number): void {
+        // 最小値や最大値を設定することも検討
+        this.inputCharLimit = Math.max(100, limit); // 最低100文字
+    }
+
+    /**
+     * 入力文字数制限を取得
+     */
+    getInputCharLimit(): number {
+        return this.inputCharLimit;
+    }
 
     /**
      * プロンプトを生成
@@ -418,11 +433,17 @@ export class PromptGenerator {
         const headerLines = headerPart.split('\n');
         for (const line of headerLines) {
             const lineWithNewline = line + '\n';
+            // 現在のパートと行を結合するとcharLimitを超える場合、現在のパートを保存
             if ((currentPart + lineWithNewline).length > charLimit && currentPart !== '') {
                 parts.push(currentPart);
                 currentPart = '';
             }
             currentPart += lineWithNewline;
+            // 1行がcharLimitを超える場合、その行自体を分割する
+            while (currentPart.length > charLimit) {
+                parts.push(currentPart.substring(0, charLimit));
+                currentPart = currentPart.substring(charLimit);
+            }
         }
 
         // 各ファイルブロックを処理
@@ -431,11 +452,17 @@ export class PromptGenerator {
             const blockLines = fileBlock.split('\n');
             for (const line of blockLines) {
                 const lineWithNewline = line + '\n';
+                // 現在のパートと行を結合するとcharLimitを超える場合、現在のパートを保存
                 if ((currentPart + lineWithNewline).length > charLimit && currentPart !== '') {
                     parts.push(currentPart);
                     currentPart = '';
                 }
                 currentPart += lineWithNewline;
+                // 1行がcharLimitを超える場合、その行自体を分割する
+                while (currentPart.length > charLimit) {
+                    parts.push(currentPart.substring(0, charLimit));
+                    currentPart = currentPart.substring(charLimit);
+                }
             }
         }
 
@@ -479,8 +506,7 @@ export class PromptGenerator {
      * 文字数制限をチェック
      */
     async checkCharLimit(): Promise<{ current: number; limit: number; exceeded: boolean; parts: number }> {
-        const config = vscode.workspace.getConfiguration('llmBridge');
-        const limit = config.get<number>('inputCharLimit', 4000);
+        const limit = this.inputCharLimit; // プロパティから取得
         const prompt = await this.generate(); // generate()はフルプロンプトを返す
 
         const parts = Math.ceil(prompt.length / limit);

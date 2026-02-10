@@ -23,7 +23,7 @@ export interface ResponseAppliedDetails {
 }
 
 export interface UserActionDetails {
-    actionType: 'add_file_to_context' | 'clear_context' | 'confirm_apply' | 'remove_file' | 'set_mode' | 'set_task_type' | 'set_instruction' | 'set_system_prompt_level';
+    actionType: 'add_file_to_context' | 'clear_context' | 'confirm_apply' | 'remove_file' | 'set_mode' | 'set_task_type' | 'set_instruction' | 'set_system_prompt_level' | 'set_input_char_limit';
     target?: string;
     status: 'success' | 'failure';
     message?: string;

@@ -94,6 +94,9 @@ class SidebarProvider {
                     await vscode.commands.executeCommand('llmBridge.setSystemPromptLevel', data.level);
                     this.refresh();
                     break;
+                case 'setInputCharLimit':
+                    await vscode.commands.executeCommand('llmBridge.setInputCharLimit', data.limit);
+                    break;
                 case 'setInstruction':
                     this.contextManager.setInstruction(data.instruction);
                     // 指示の入力は頻繁なので履歴には記録しない
@@ -137,6 +140,7 @@ class SidebarProvider {
                 taskTypes: this.promptGenerator.getAvailableTaskTypes(),
                 instruction: this.contextManager.getInstruction(),
                 systemPromptLevel: this.promptGenerator.getSystemPromptLevel(),
+                inputCharLimit: this.promptGenerator.getInputCharLimit(), // 新しいプロパティを追加
                 history: this.historyManager.getHistory(), // 履歴データを追加
             });
             this.updateCharCount();
@@ -415,11 +419,8 @@ class SidebarProvider {
             background-color: var(--vscode-editorGroup-background); /* 背景色を明確に */
         }
         .history-item.expanded .history-content {
-            /* max-height: none; はtransitionと相性が悪い */
-            /* JavaScriptで動的にmax-heightを設定するため、ここでの固定値は不要になるが、
-               transitionが効くようにデフォルトのmax-heightを少し大きくしておくか、
-               JavaScriptでscrollHeightを設定する */
-            /* max-height: 2000px; */ /* この行はJavaScriptが上書きするので削除またはコメントアウト */
+            max-height: 1000px; /* ある程度の最大高さを設定 */
+            transition: max-height 0.5s ease-in;
             overflow-y: auto;
         }
         .history-detail {
@@ -468,6 +469,11 @@ class SidebarProvider {
         <div class="progress-bar">
             <div class="progress-fill" id="progressFill" style="width: 0%"></div>
         </div>
+    </div>
+
+    <div class="section">
+        <label for="charLimitInput">文字数上限 (分割):</label>
+        <input type="number" id="charLimitInput" value="4000" min="100">
     </div>
 
     <div class="split-nav" id="splitNav" style="display: none; margin-bottom: 12px;">
@@ -556,6 +562,7 @@ class SidebarProvider {
         const fullPromptBtn = document.getElementById('fullPrompt');
         const minimalPromptBtn = document.getElementById('minimalPrompt');
         const historyList = document.getElementById('historyList');
+        const charLimitInput = document.getElementById('charLimitInput'); // 新しい要素を取得
 
         // モード切り替え
         browseMode.addEventListener('click', () => {
@@ -584,6 +591,22 @@ class SidebarProvider {
             minimalPromptBtn.classList.add('active');
             fullPromptBtn.classList.remove('active');
             vscode.postMessage({ type: 'setSystemPromptLevel', level: 'minimal' });
+        });
+
+        // 文字数上限変更
+        let charLimitTimeout;
+        charLimitInput.addEventListener('input', () => {
+            clearTimeout(charLimitTimeout);
+            charLimitTimeout = setTimeout(() => {
+                const limit = parseInt(charLimitInput.value);
+                if (!isNaN(limit) && limit >= 100) {
+                    vscode.postMessage({ type: 'setInputCharLimit', limit: limit });
+                } else {
+                    vscode.window.showErrorMessage('文字数上限は100以上の数値を入力してください。');
+                    // UIの表示を元に戻すか、エラー状態にする
+                    charLimitInput.value = limitCount.textContent; // 元の制限値に戻す
+                }
+            }, 500);
         });
 
         // 指示入力
@@ -657,6 +680,12 @@ class SidebarProvider {
             } else {
                 minimalPromptBtn.classList.add('active');
                 fullPromptBtn.classList.remove('active');
+            }
+
+            // 文字数上限
+            if (data.inputCharLimit !== undefined) {
+                charLimitInput.value = data.inputCharLimit;
+                limitCount.textContent = data.inputCharLimit; // limitCountも更新
             }
 
             // ファイルリスト
